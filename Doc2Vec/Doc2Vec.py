@@ -3,21 +3,21 @@ import numpy as np
 import collections
 import tensorflow as tf
 
-batch_size = 5
+batch_size = 128
 embedding_size = 50 # Dimension of the embedding vector.
-num_sampled = 10 # Number of negative examples to sample.
-vocab_size = 20
-window_size = 3
+window_size = 5
 context_window_size = 2*window_size
 num_negative_sample = 5
 
+
 class ParagraphVector:
 
-    def __init__(self):
+    def __init__(self, minCount = 0):
         self.center_words = []
         self.context_words = []
         self.doc_ids = []
         self.doc_generated = False
+        self.minCount = minCount
 
     def prepare_dataset(self, data):
         # assume data is the pandas dataframe with pid to claims mapping
@@ -35,6 +35,7 @@ class ParagraphVector:
                 doc2id_map[name] = len(doc2id_map)
                 id2doc_map[doc2id_map[name]] = name
         self.id2doc_map = id2doc_map
+        self.doc2id_map = doc2id_map
 
         # need to clean the claim data
         # claim Number
@@ -46,27 +47,37 @@ class ParagraphVector:
             for claim in claims["CLAIM_TEXT"]:
                 documents[doc_name].extend(claim.split())
             words.extend(documents[doc_name])
+        # save document mapping
+        import pickle
+        pickle.dump(self.doc2id_map, open("doc2id_map.p", "wb"))
+        #del self.doc2id_map
+        del self.id2doc_map
 
         # data sharing
         self.documents = documents
 
         # use words to generate dictionary
-        w_count = [["unknow", -1]]
-        w_count.extend(collections.Counter(words).most_common(vocab_size-1))
+        # w_count = [["unknow", -1]]
+
         # num input sample equal num of words
         self.instance_num = len(words)
+        # handle dictionary size with min count
+        w_count = collections.Counter(words)
         del words
         # generate word dicitonary
         dictionary = dict()
-        for word, _ in w_count:
-            dictionary[word] = len(dictionary)
+        dictionary["unknow"] = 0
+        for word, c in w_count.items():
+            if(c > self.minCount):
+                dictionary[word] = len(dictionary)
         self.dictionary = dictionary
+        self.vocab_size = len(dictionary)
 
     def generate_document(self):
         for pid, doc in self.documents.items():
             if(self.doc_generated is False):
                 # handle unknow words
-                self.documents[pid] = [vocab_size]*window_size +[self.dictionary[w] if w in self.dictionary else 0 for w in doc] + [vocab_size]*window_size
+                self.documents[pid] = [self.vocab_size]*window_size +[self.dictionary[w] if w in self.dictionary else 0 for w in doc] + [self.vocab_size]*window_size
             # start for center words
             for i in range(window_size, len(doc)-window_size):
                 yield (self.documents[pid][i], pid, self.documents[pid][i-window_size:i]+self.documents[pid][i+1:i+window_size+1])
@@ -99,7 +110,8 @@ class ParagraphVector:
         #yield (center_words, doc_ids, context_words)
         self.doc_generated = True
 
-
+    def infer(self, doc_name):
+        return self.final_doc_embedding[self.doc2id_map[doc_name]]
 
     def build_graph(self):
 
@@ -113,7 +125,7 @@ class ParagraphVector:
 
             with tf.name_scope("hidden_layer"):
                 # create emebedding weights
-                word_embed_w = tf.Variable(tf.random_uniform([vocab_size, embedding_size], -1.0, 1.0))
+                word_embed_w = tf.Variable(tf.random_uniform([self.vocab_size, embedding_size], -1.0, 1.0))
                 word_embed_w = tf.concat([word_embed_w, tf.zeros((1, embedding_size))], 0)
                 doc_embed_w = tf.Variable(tf.random_uniform([len(self.documents), embedding_size], -1.0, 1.0))
 
@@ -126,10 +138,10 @@ class ParagraphVector:
                 embedding = (word_embed_lookup + doc_emebed_lookup)/2.0
 
                 # nce_loss
-                nce_w = tf.Variable(tf.truncated_normal([vocab_size, embedding_size], stddev=1.0/np.sqrt(embedding_size)))
-                nce_bias = tf.Variable(tf.zeros([vocab_size]))
+                nce_w = tf.Variable(tf.truncated_normal([self.vocab_size, embedding_size], stddev=1.0/np.sqrt(embedding_size)))
+                nce_bias = tf.Variable(tf.zeros([self.vocab_size]))
 
-                nce_loss = tf.reduce_mean(tf.nn.nce_loss(nce_w, nce_bias, center_word_input, embedding, num_negative_sample, vocab_size))
+                nce_loss = tf.reduce_mean(tf.nn.nce_loss(nce_w, nce_bias, center_word_input, embedding, num_negative_sample, self.vocab_size))
 
 
 
