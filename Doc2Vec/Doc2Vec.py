@@ -1,10 +1,15 @@
+#TODO text cleaning and preprocessing(lemmatization)
+
 import pandas as pd
 import numpy as np
 import collections
 import tensorflow as tf
+import pickle
+from tqdm import tqdm
 
+# all the hyperparameter
 batch_size = 128
-embedding_size = 50 # Dimension of the embedding vector.
+embedding_size = 400 # Dimension of the embedding vector.
 window_size = 5
 context_window_size = 2*window_size
 num_negative_sample = 5
@@ -48,7 +53,6 @@ class ParagraphVector:
                 documents[doc_name].extend(claim.split())
             words.extend(documents[doc_name])
         # save document mapping
-        import pickle
         pickle.dump(self.doc2id_map, open("doc2id_map.p", "wb"))
         #del self.doc2id_map
         del self.id2doc_map
@@ -93,7 +97,7 @@ class ParagraphVector:
         center_words = []
         doc_ids = []
         context_words = []
-        for data in self.generate_document():
+        for data in tqdm(self.generate_document()):
             if(cur_iter == batch_size):
                 yield(center_words, doc_ids, context_words)
                 center_words = [data[0]]
@@ -113,12 +117,34 @@ class ParagraphVector:
     def infer(self, doc_name):
         return self.final_doc_embedding[self.doc2id_map[doc_name]]
 
+    def create_summary(self):
+        with tf.name_scope("summary"):
+            tf.summary.scalar("loss", self.loss)
+            tf.summary.histogram("histogram_loss", self.loss)
+            self.summary_op = tf.summary.merge_all()
+
+    @staticmethod
+    def load_weights():
+        doc_embed_w = tf.get_variable("doc_embed_w")
+        saver = tf.train.Saver()
+        with tf.Session() as sess:
+            saver.resture(sess, "./stored_session.ckpt")
+            print("model restored")
+            norm = tf.sqrt(tf.reduce_sum(tf.square(doc_embed_w.eval()), 1, keep_dims=True))
+            normalized_doc_embedding = doc_embed_w.eval()/norm
+            return normalized_doc_embedding
+
+    @staticmethod
+    def load_info():
+        return (pickle.load(open("doc2id_map.p", "rb")), pickle.load(open("final_doc_embedding.pk", "rb")))
+
     def build_graph(self):
 
         graph = tf.Graph()
         with graph.as_default():
 
             with tf.name_scope("input_layer"):
+
                 doc_ids_input = tf.placeholder(tf.int32, shape=[batch_size])
                 context_word_input = tf.placeholder(tf.int32, shape=[batch_size*context_window_size])
                 center_word_input = tf.placeholder(tf.int32, shape=[batch_size, 1])
@@ -142,20 +168,24 @@ class ParagraphVector:
                 nce_bias = tf.Variable(tf.zeros([self.vocab_size]))
 
                 nce_loss = tf.reduce_mean(tf.nn.nce_loss(nce_w, nce_bias, center_word_input, embedding, num_negative_sample, self.vocab_size))
-
-
+                self.loss = nce_loss
 
 
             # start training
 
             epoch = 2
-            optimizer = tf.train.AdagradOptimizer(0.5).minimize(nce_loss)
+            self.global_step = tf.Variable(0, dtype=tf.int32, trainable=False, name="global_step")
+            optimizer = tf.train.AdagradOptimizer(0.5).minimize(nce_loss, global_step = self.global_step)
 
             # normalize doc embedding
             norm = tf.sqrt(tf.reduce_sum(tf.square(doc_embed_w), 1, keep_dims=True))
             normalized_doc_embedding = doc_embed_w/norm
 
+            # prepare summary
+            self.create_summary()
+
             with tf.Session(graph=graph) as session:
+                writer = tf.summary.FileWriter("summary", session.graph)
                 tf.global_variables_initializer().run()
                 print("start training")
                 for i in range(epoch):
@@ -163,17 +193,18 @@ class ParagraphVector:
                     # batch Training
                     for batch in self.generate_batch():
                         #print (np.reshape(batch[0], (batch_size,1)),batch[1],batch[2])
-                        _, batch_loss = session.run([optimizer, nce_loss], feed_dict=
+                        _, batch_loss, summary = session.run([optimizer, nce_loss, self.summary_op], feed_dict=
                         {center_word_input: np.reshape(batch[0], (batch_size,1)),
                         doc_ids_input:batch[1],
                         context_word_input: batch[2]
                         })
+                        writer.add_summary(summary, global_step=self.global_step.eval())
                         print("loss: ", batch_loss)
-
-                # save model
-                saver = tf.train.Saver()
-                saver.save(session, "./stored_session.ckpt")
 
                 # save weights/word embedding
                 self.final_word_embedding = word_embed_w.eval(session=session)
                 self.final_doc_embedding = normalized_doc_embedding.eval(session=session)
+                # save model
+                #saver = tf.train.Saver({"final_doc_embedding": self.final_doc_embedding})
+                #saver.save(session, "./stored_session.ckpt", global_step=self.global_step)
+                pickle.dump(self.final_doc_embedding, open("final_doc_embedding.pk", "wb"))

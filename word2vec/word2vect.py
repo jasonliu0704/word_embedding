@@ -64,6 +64,9 @@ class SkipGramWord2Vec:
         # define optimizer
         optimizer = tf.train.GradientDescentOptimizer(LEARNING_RATE).minimize(nce_loss)
 
+    def create_summary(self):
+        with tf.name_scope("summary"):
+
         # training
         with tf.Session() as sess:
             sess.run(tf.global_variables_initializer())
